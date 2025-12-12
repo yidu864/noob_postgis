@@ -80,10 +80,19 @@ SELECT name, ST_AsText(ST_Transform(geom, 3857)) FROM places;
 SELECT name, ST_AsGeoJSON(geom) FROM places;
 ```
 
-- 计算面积 `ST_Area`
+- 计算面积/长度/两点间球面距离 `ST_Area/ST_Length/ST_Distance`
+
+**::geography 是临时将 geom_polygon(geometry(POLYGON, 4326)) 转为 geography 类型**
+
+**转换后计算出的值单位是 平方米, 不做转换计算出的是 平方度(平面笛卡尔坐标系方格数量), 不能直接使用**
+
+> 例外是 GEOMETRY 数据使用 以米未单位的投影坐标系(例如国内的 CGCS2000 / 3-degree Gauss-Kruger zone 40，EPSG:4547), 那么无需转换计算出的结果就是平方米/米
 
 ```sql
 SELECT name, ST_Area(geom) FROM counties;
+SELECT feature_name, st_area(geom_polygon::geography) from "public".learn_table;
+SELECT feature_name, st_length(geom_linestring::geography) from "public".learn_table
+SELECT feature_name, st_distance(geom_point::geography, st_geomfromtext('POINT(121.5645 25.0330)',4326)::geography) from "public".learn_table
 ```
 
 - 获取几何类型
@@ -114,6 +123,47 @@ SET geom = ST_MakeValid(geom)
 WHERE NOT ST_IsValid(geom);
 ```
 
+- geojson 转 geom `ST_GeomFromGeoJSON`
+
+```sql
+INSERT INTO "public".learn_table (feature_name, geom_linestring)
+SELECT
+  CONCAT_WS('-', 'pois', feature->'properties'->>'name') as feature_name,
+  ST_SetSRID(
+    ST_GeomFromGeoJSON(feature->'geometry'),  -- 关键修正：传入整个geometry对象
+    4326
+  ) AS geom_polygon
+FROM jsonb_array_elements(
+  '{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": { "name": "中山高速公路" },
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [121.3, 25.1],
+          [121.55, 25.05],
+          [121.7, 24.9]
+        ]
+      }
+    }
+  ]
+}
+'::jsonb->'features'
+) AS feature;
+```
+
+- 面是否包含点/线/面`st_contains`
+
+```sql
+SELECT p.feature_name as "点", c.feature_name as "面"
+FROM "public".learn_table p
+JOIN "public".learn_table c ON c.feature_name = '台北市'
+WHERE ST_Contains(c.geom_polygon, p.geom_point);
+```
+
 ## 导入数据
 
 ### geojson
@@ -121,19 +171,31 @@ WHERE NOT ST_IsValid(geom);
 #### 用 sql
 
 ```sql
-CREATE TABLE counties_raw(json jsonb);
-INSERT INTO counties_raw VALUES (
-  '...你的GeoJSON文本...'
-);
-CREATE TABLE counties AS
+INSERT INTO "public".learn_table (feature_name, geom_linestring)
 SELECT
-  feature->'properties'->>'name' AS name,
+  CONCAT_WS('-', 'pois', feature->'properties'->>'name') as feature_name,
   ST_SetSRID(
-    ST_GeomFromGeoJSON(feature->'geometry'),
+    ST_GeomFromGeoJSON(feature->'geometry'),  -- 关键修正：传入整个geometry对象
     4326
-  ) AS geom
+  ) AS geom_polygon
 FROM jsonb_array_elements(
-  (SELECT json->'features' FROM counties_raw)
+  '{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": { "name": "中山高速公路" },
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [121.3, 25.1],
+          [121.55, 25.05],
+          [121.7, 24.9]
+        ]
+      }
+    }
+  ]
+}
+'::jsonb->'features'
 ) AS feature;
-
 ```
