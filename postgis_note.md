@@ -44,6 +44,28 @@ docker run -d -p 5433:80 --name pgadmin4 -e PGADMIN_DEFAULT_EMAIL=test@123.com -
 
 暂无
 
+#### 安装 ogr2ogr
+
+> 需要安装 gdal, 推荐 docker 或者 miniconda 安装
+
+使用 docker 安装最简单, 但是要做目录映射, 在 win 环境不友好
+
+```bash
+docker run --rm -it \
+  -v /本地/数据目录:/data \
+  --network="host" \
+  osgeo/gdal:ubuntu-full-latest \
+  ogr2ogr -f "PostgreSQL" PG:"host=host.docker.internal dbname=你的数据库 user=你的用户 password=你的密码" /data/your_shapefile.shp -nln 新表名
+```
+
+conda 安装, 需要至少 py3.11 环境
+
+```bash
+conda create -n 虚拟环境名 python=3.11
+conda activate 虚拟环境名
+conda install conda-forge::gdal
+```
+
 ## 基本类型
 
 - POINT
@@ -199,3 +221,28 @@ FROM jsonb_array_elements(
 '::jsonb->'features'
 ) AS feature;
 ```
+
+#### 用 ogr2ogr
+
+> 需要安装 gdal, 推荐 docker 或者 miniconda 安装
+
+使用 docker 安装最简单, 但是要做目录映射, 在 win 环境不友好
+
+```bash
+docker run --rm -it \
+  -v /本地/数据目录:/data \
+  --network="host" \
+  osgeo/gdal:ubuntu-full-latest \
+  ogr2ogr -f "PostgreSQL" PG:"host=host.docker.internal dbname=你的数据库 user=你的用户 password=你的密码" /data/your_shapefile.shp -nln 新表名
+```
+
+conda 安装, 需要至少 py3.11 环境, 且需要使用国内源
+
+```bash
+conda create -n 虚拟环境名 python=3.11
+conda activate 虚拟环境名
+conda install conda-forge::gdal
+gdal --version
+```
+
+不安装 gdal, 只安装 ogr2ogr 相关包 [前往 gisinternals](https://www.gisinternals.com/development.php)
