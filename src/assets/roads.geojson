@@ -1,0 +1,17 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": { "name": "中山高速公路" },
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [121.3, 25.1],
+          [121.55, 25.05],
+          [121.7, 24.9]
+        ]
+      }
+    }
+  ]
+}

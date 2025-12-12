@@ -1,0 +1,21 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": { "name": "台北101" },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [121.5645, 25.033]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": { "name": "高雄85大楼" },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [120.302, 22.612]
+      }
+    }
+  ]
+}

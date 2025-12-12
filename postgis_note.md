@@ -1,3 +1,5 @@
+[toc]
+
 ## postgis 笔记
 
 ## 安装软件与环境
@@ -38,9 +40,9 @@ docker run --name postgis -e POSTGRES_PASSWORD=123456 -p 5432:5432 -d postgis/po
 docker run -d -p 5433:80 --name pgadmin4 -e PGADMIN_DEFAULT_EMAIL=test@123.com -e PGADMIN_DEFAULT_PASSWORD=123456 dpage/pgadmin4
 ```
 
-> dbeaver, win 便携版
+> dbeaver, win 便携版 (社区版本没有 GIS 数据可视化功能, 需要企业版)
 
-[点击下载](https://www.ghxi.com/dbeavercommunity.html)
+暂无
 
 ## 基本类型
 

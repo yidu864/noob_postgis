@@ -1,0 +1,68 @@
+-- 创建点
+SELECT ST_GeomFromText('POINT(120.3 23.1)', 4326);
+
+-- 创建多边形
+SELECT ST_GeomFromText('POLYGON((0 0, 0 1, 1 1, 1 0, 0 0))', 4326);
+
+-- 创建表
+
+-- 连接数据库后执行
+CREATE EXTENSION IF NOT EXISTS postgis; -- 核心扩展
+CREATE EXTENSION IF NOT EXISTS postgis_topology; -- 用于topo_geom字段
+-- CREATE EXTENSION IF NOT EXISTS postgis_raster; -- 如需栅格学习
+
+CREATE TABLE learn_table (
+    -- 基础信息
+    id SERIAL PRIMARY KEY, -- 自增主键
+    feature_name VARCHAR(255), -- 要素名称
+    description TEXT, -- 描述
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, -- 创建时间
+
+    -- 核心几何类型（使用EPSG:4326，即WGS84经纬度）
+    geom_point GEOMETRY(POINT, 4326), -- 点
+    geom_linestring GEOMETRY(LINESTRING, 4326), -- 线
+    geom_polygon GEOMETRY(POLYGON, 4326), -- 面（多边形）
+    geom_multipoint GEOMETRY(MULTIPOINT, 4326), -- 多点
+    geom_multilinestring GEOMETRY(MULTILINESTRING, 4326), -- 多线
+    geom_multipolygon GEOMETRY(MULTIPOLYGON, 4326), -- 多面
+    geom_collection GEOMETRY(GEOMETRYCOLLECTION, 4326), -- 几何集合（可混合类型）
+
+    -- 地理类型（用于全球球面计算，对比用）
+    geog_point GEOGRAPHY(POINT), -- 地理点
+    geog_polygon GEOGRAPHY(POLYGON), -- 地理多边形
+
+    -- 拓扑几何（需先启用PostGIS Topology扩展）
+    topo_geom TOPOGEOMETRY, -- 拓扑几何，关联于一个拓扑结构
+
+    -- 栅格数据（需先启用PostGIS Raster扩展）
+    -- raster_data RASTER, -- 如需学习栅格可取消注释
+
+    -- 元数据与验证
+    srid INTEGER, -- 空间参考ID（可存储用于对比的不同坐标系）
+    is_valid BOOLEAN, -- 几何是否有效（可通过ST_IsValid检查填充）
+    area_m2 DOUBLE PRECISION, -- 面积（平方米，可通过ST_Area计算填充）
+    length_m DOUBLE PRECISION -- 长度（米，可通过ST_Length计算填充）
+);
+
+-- 可选：为几何字段创建空间索引以加速查询
+CREATE INDEX idx_geom_point ON learn_table USING GIST(geom_point);
+CREATE INDEX idx_geom_polygon ON learn_table USING GIST(geom_polygon);
+-- ... 可根据学习查询需要，为其他几何字段创建索引
+
+-- 插入数据
+INSERT INTO "public".learn_table (feature_name, geom_point) VALUES 
+('台北101', ST_GeomFromText('POINT(121.5645 25.0330)', 4326)),
+('高雄85大楼', ST_GeomFromText('POINT(120.3020 22.6120)', 4326));
+
+INSERT INTO "public".learn_table (feature_name, geom_linestring) VALUES 
+('道路1', ST_GeomFromText('LINESTRING(121.5 25.0, 121.6 25.1)', 4326));
+INSERT INTO "public".learn_table (feature_name, geom_polygon) VALUES 
+('地块1', ST_GeomFromText('POLYGON((121.57 25.04, 121.58 25.04, 121.58 25.03, 121.57 25.03, 121.57 25.04))', 4326));
+
+-- 检查 srid
+SELECT feature_name, ST_SRID(geom_point) FROM "public".learn_table;
+-- 修正srid
+UPDATE "public".learn_table SET geom_point = ST_SetSRID(geom_point, 4326);
+-- 转换 srid
+SELECT feature_name, ST_AsText(ST_Transform(geom_point, 3857)) FROM "public".learn_table;
+

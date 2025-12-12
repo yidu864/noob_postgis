@@ -1,0 +1,37 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": { "name": "台北市" },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [121.45, 25.15],
+            [121.65, 25.15],
+            [121.65, 24.95],
+            [121.45, 24.95],
+            [121.45, 25.15]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": { "name": "新北市" },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [121.3, 25.3],
+            [121.8, 25.3],
+            [121.8, 24.8],
+            [121.3, 24.8],
+            [121.3, 25.3]
+          ]
+        ]
+      }
+    }
+  ]
+}
