@@ -1,3 +1,8 @@
+-- 连接数据库后执行
+CREATE EXTENSION IF NOT EXISTS postgis; -- 核心扩展
+CREATE EXTENSION IF NOT EXISTS postgis_topology; -- 用于topo_geom字段
+-- CREATE EXTENSION IF NOT EXISTS postgis_raster; -- 如需栅格学习
+
 -- 创建点
 SELECT ST_GeomFromText('POINT(120.3 23.1)', 4326);
 
@@ -5,12 +10,6 @@ SELECT ST_GeomFromText('POINT(120.3 23.1)', 4326);
 SELECT ST_GeomFromText('POLYGON((0 0, 0 1, 1 1, 1 0, 0 0))', 4326);
 
 -- 创建表
-
--- 连接数据库后执行
-CREATE EXTENSION IF NOT EXISTS postgis; -- 核心扩展
-CREATE EXTENSION IF NOT EXISTS postgis_topology; -- 用于topo_geom字段
--- CREATE EXTENSION IF NOT EXISTS postgis_raster; -- 如需栅格学习
-
 CREATE TABLE learn_table (
     -- 基础信息
     id SERIAL PRIMARY KEY, -- 自增主键
@@ -225,5 +224,3 @@ WHERE ST_Contains(c.geom_polygon, p.geom_point);
 
 -- 面积排序
 SELECT feature_name, st_area(geom_polygon::geography) as area_m2 FROM "public".learn_table ORDER BY area_m2 DESC;
-
--- 第四天

@@ -186,6 +186,35 @@ JOIN "public".learn_table c ON c.feature_name = '台北市'
 WHERE ST_Contains(c.geom_polygon, p.geom_point);
 ```
 
+- 空间分析
+
+> 特别注意, 进行度量计算时, 需要把 geomtry 转为 geomgraphy,否则得出的结果单位是度
+> 拓扑关系(包含/相交/重叠)时, 在小范围可以不用转换, 但是大范围/高纬度时需要转换,否则不准
+
+```sql
+-- ST_Buffer(geom, distance) -- 扩大或缩小图形
+SELECT feature_name, ST_Buffer(geom_polygon::geography, 1000)::geometry AS poly FROM "public".learn_table WHERE feature_name = 't_poly_1';
+-- ST_Intersection(a, b) -- 求两个多边形的交集
+SELECT 'intersection' as feature_name,ST_Intersection(a.geom_polygon, b.geom_polygon) as geom
+FROM "public".learn_table a, "public".learn_table b
+WHERE a.feature_name='t_poly_1' AND b.feature_name='t_poly_2';
+-- ST_Difference(a, b) -- a - b，求差异部分, a图形减去与b图形相交部分
+SELECT 'ST_Difference' as feature_name,ST_Difference(a.geom_polygon, b.geom_polygon) as geom
+FROM "public".learn_table a, "public".learn_table b
+WHERE a.feature_name='t_poly_1' AND b.feature_name='t_poly_2';
+-- ST_Intersects(a, b) -- 判断是否相交（边触碰也算）
+SELECT 'ST_Difference' as feature_name,ST_Intersects(a.geom_polygon, b.geom_polygon)
+FROM "public".learn_table a, "public".learn_table b
+WHERE a.feature_name='t_poly_1' AND b.feature_name='t_poly_2';
+-- ST_Contains(a, b) -- a 完全包含 b？
+SELECT feature_name, ST_Contains(ST_Buffer(geom_polygon::geography, 1000)::geometry, geom_polygon) FROM "public".learn_table WHERE feature_name = 't_poly_1';
+-- ST_Within(a, b) -- a 是否在 b 内？
+SELECT feature_name, ST_Contains(ST_Buffer(geom_polygon::geography, 0)::geometry, geom_polygon) FROM "public".learn_table WHERE feature_name = 't_poly_1';
+-- ST_Overlaps 重叠(同纬度)
+SELECT feature_name, ST_Overlaps(ST_Buffer(geom_polygon::geography, 0)::geometry, geom_polygon) FROM "public".learn_table WHERE feature_name = 't_poly_1';
+
+```
+
 ## 导入数据
 
 ### geojson
