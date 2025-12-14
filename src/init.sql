@@ -223,4 +223,4 @@ JOIN "public".learn_table c ON c.feature_name = '台北市'
 WHERE ST_Contains(c.geom_polygon, p.geom_point);
 
 -- 面积排序
-SELECT feature_name, st_area(geom_polygon::geography) as area_m2 FROM "public".learn_table ORDER BY area_m2 DESC;
+SELECT feature_name, st_area(geom_polygon::geography) as area_m2 FROM "public".learn_table ORDER BY area_m2 asc;

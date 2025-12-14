@@ -190,6 +190,7 @@ WHERE ST_Contains(c.geom_polygon, p.geom_point);
 
 > 特别注意, 进行度量计算时, 需要把 geomtry 转为 geomgraphy,否则得出的结果单位是度
 > 拓扑关系(包含/相交/重叠)时, 在小范围可以不用转换, 但是大范围/高纬度时需要转换,否则不准
+> ST_Difference 不支持 geography 类型计算
 
 ```sql
 -- ST_Buffer(geom, distance) -- 扩大或缩小图形
