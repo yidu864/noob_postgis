@@ -193,8 +193,9 @@ WHERE ST_Contains(c.geom_polygon, p.geom_point);
 > ST_Difference 不支持 geography 类型计算
 
 ```sql
--- ST_Buffer(geom, distance) -- 扩大或缩小图形
+-- ST_Buffer(geom, distance) -- 扩大或缩小图形(与圆角?)
 SELECT feature_name, ST_Buffer(geom_polygon::geography, 1000)::geometry AS poly FROM "public".learn_table WHERE feature_name = 't_poly_1';
+-- 与 buffer 相对的是 ST_Expand ,只扩展边框, 不改变形状
 -- ST_Intersection(a, b) -- 求两个多边形的交集
 SELECT 'intersection' as feature_name,ST_Intersection(a.geom_polygon, b.geom_polygon) as geom
 FROM "public".learn_table a, "public".learn_table b
@@ -214,6 +215,29 @@ SELECT feature_name, ST_Contains(ST_Buffer(geom_polygon::geography, 0)::geometry
 -- ST_Overlaps 重叠(同纬度)
 SELECT feature_name, ST_Overlaps(ST_Buffer(geom_polygon::geography, 0)::geometry, geom_polygon) FROM "public".learn_table WHERE feature_name = 't_poly_1';
 
+```
+
+- `ST_DWithin()` 判断两个几何是否在指定距离内的函数。
+
+```sql
+ST_DWithin(geometry A, geometry B, distance)
+-- 或
+ST_DWithin(geography A, geography B, distance)
+```
+
+- 操作符
+
+```sql
+-- 这些操作符可以直接使用索引：
+a.geom && b.geom        -- 边界框相交
+a.geom ~ b.geom         -- 包含
+a.geom @ b.geom         -- 被包含
+ST_Contains(a.geom, b.geom)
+ST_Within(a.geom, b.geom)
+
+-- 这些函数会自动利用索引：
+ST_DWithin(a.geom, b.geom, distance)
+ST_Intersects(a.geom, b.geom)  -- 实际上被优化为 && + 精确计算
 ```
 
 ## 导入数据
@@ -276,3 +300,547 @@ gdal --version
 ```
 
 不安装 gdal, 只安装 ogr2ogr 相关包 [前往 gisinternals](https://www.gisinternals.com/development.php)
+
+## 索引,性能,优化
+
+### 🎯 学习目标
+
+1. 理解 **为什么空间查询慢**
+2. 正确创建 **GiST 空间索引**
+3. 使用 `EXPLAIN ANALYZE` 判断是否命中索引
+4. 写出 **“可被索引使用”** 的空间 SQL
+5. 知道常见 **性能坑**（非常重要）
+
+---
+
+### 🧠 Part 1（30 min）空间索引原理（必须理解）
+
+#### 1️⃣ 什么是空间索引（GiST）
+
+- PostGIS 默认使用 **GiST（Generalized Search Tree）**
+- 底层是 **R-Tree 思想**
+- 索引的是 **最小外接矩形（BBox）**
+
+👉 关键点：
+
+> **索引 ≠ 精确几何**
+> 索引先过滤「可能相交的候选」，再做精确计算
+
+---
+
+#### 2️⃣ 没索引 vs 有索引的区别（直觉理解）
+
+| 情况      | 执行方式                     |
+| --------- | ---------------------------- |
+| ❌ 无索引 | 全表扫描（每个图斑都算一次） |
+| ✅ 有索引 | 先用 BBox 排除 99% 无关数据  |
+
+---
+
+### 导入数据
+
+```sql
+CREATE TABLE "public".counties as
+SELECT
+  feature->'properties'->>'name' AS feature_name,
+  ST_SetSRID(
+    ST_GeomFromGeoJSON(feature->'geometry'),  -- 关键修正：传入整个geometry对象
+    4326
+  ) AS geom
+FROM jsonb_array_elements(
+  '{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": { "name": "台北市" },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[[121.45,25.15],[121.65,25.15],[121.65,24.95],[121.45,24.95],[121.45,25.15]]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": { "name": "新北市" },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[[121.3,25.3],[121.8,25.3],[121.8,24.8],[121.3,24.8],[121.3,25.3]]]
+      }
+    }
+  ]
+}'::jsonb->'features'
+) AS feature;
+
+CREATE TABLE "public".land_parcels as
+SELECT
+  CONCAT_WS('-', 'land_parcels', feature->'properties'->>'id') as feature_name,
+  ST_SetSRID(
+    ST_GeomFromGeoJSON(feature->'geometry'),  -- 关键修正：传入整个geometry对象
+    4326
+  ) AS geom
+FROM jsonb_array_elements(
+  '{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": { "id": 1 },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [121.5, 25.06],
+            [121.58, 25.06],
+            [121.58, 25.0],
+            [121.5, 25.0],
+            [121.5, 25.06]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": { "id": 2 },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [121.55, 25.04],
+            [121.63, 25.04],
+            [121.63, 24.98],
+            [121.55, 24.98],
+            [121.55, 25.04]
+          ]
+        ]
+      }
+    }
+  ]
+}
+'::jsonb->'features'
+) AS feature;
+
+CREATE TABLE "public".pois as
+SELECT
+  CONCAT_WS('-', 'pois', feature->'properties'->>'name') as feature_name,
+  ST_SetSRID(
+    ST_GeomFromGeoJSON(feature->'geometry'),  -- 关键修正：传入整个geometry对象
+    4326
+  ) AS geom
+FROM jsonb_array_elements(
+  '{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": { "name": "台北101" },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [121.5645, 25.033]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": { "name": "高雄85大楼" },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [120.302, 22.612]
+      }
+    }
+  ]
+}
+'::jsonb->'features'
+) AS feature;
+
+CREATE TABLE "public".roads AS
+SELECT
+  CONCAT_WS('-', 'roads', feature->'properties'->>'name') as feature_name,
+  ST_SetSRID(
+    ST_GeomFromGeoJSON(feature->'geometry'),  -- 关键修正：传入整个geometry对象
+    4326
+  ) AS geom
+FROM jsonb_array_elements(
+  '{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": { "name": "中山高速公路" },
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [121.3, 25.1],
+          [121.55, 25.05],
+          [121.7, 24.9]
+        ]
+      }
+    }
+  ]
+}
+'::jsonb->'features'
+) AS feature;
+```
+
+### 🧪 Part 2（45 min）创建空间索引（实操）
+
+我们对之前导入的表全部建索引：
+
+```sql
+CREATE INDEX idx_counties_geom
+ON counties
+USING GIST (geom);
+
+CREATE INDEX idx_roads_geom
+ON roads
+USING GIST (geom);
+
+CREATE INDEX idx_pois_geom
+ON pois
+USING GIST (geom);
+
+CREATE INDEX idx_land_parcels_geom
+ON land_parcels
+USING GIST (geom);
+```
+
+#### 🔍 验证索引是否存在
+
+```sql
+SELECT
+  tablename,
+  indexname
+FROM pg_indexes
+WHERE tablename IN ('counties','roads','pois','land_parcels');
+```
+
+---
+
+### 🧠 Part 3（45 min）EXPLAIN ANALYZE：读懂执行计划
+
+#### ▶ 没索引（先删一个试试）
+
+```sql
+DROP INDEX idx_land_parcels_geom;
+```
+
+```sql
+EXPLAIN ANALYZE
+SELECT *
+FROM land_parcels a
+JOIN counties c
+ON ST_Intersects(a.geom, c.geom);
+```
+
+你会看到：
+
+```
+Seq Scan on land_parcels
+```
+
+---
+
+#### ▶ 有索引（重新建）
+
+```sql
+CREATE INDEX idx_land_parcels_geom
+ON land_parcels
+USING GIST (geom);
+```
+
+再执行：
+
+```sql
+EXPLAIN ANALYZE
+SELECT *
+FROM land_parcels a
+JOIN counties c
+ON ST_Intersects(a.geom, c.geom);
+```
+
+你应该看到类似：
+
+```
+Bitmap Index Scan using idx_land_parcels_geom
+```
+
+🎉 说明索引命中！
+
+---
+
+### 🧠 Part 4（40 min）写「索引友好」的空间 SQL / 理解为什么索引会失效
+
+#### ✅ 正确写法（索引可用）
+
+```sql
+SELECT *
+FROM land_parcels a
+WHERE ST_Intersects(
+  a.geom,
+  ST_GeomFromText('POLYGON((...))', 4326)
+);
+```
+
+---
+
+#### ❌ 错误写法（索引失效）
+
+```sql
+-- ❌ 对 geom 做函数包裹
+SELECT *
+FROM land_parcels a
+WHERE ST_Intersects(
+  ST_Buffer(a.geom, 10),
+  some_geom
+);
+```
+
+💥 原因：
+
+> **索引列不能被函数包裹**<br>
+> 实际上是 st_buffer 生成了一个新的几何(无索引), 后续计算使用新几何
+
+---
+
+#### ✅ 正确优化方式
+
+```sql
+SELECT *
+FROM land_parcels a
+WHERE ST_Intersects(
+  a.geom,
+  ST_Buffer(some_geom, 10)
+);
+-- 优化思路：使用原始几何的索引，加上距离检查
+SELECT *
+FROM land_parcels a
+WHERE ST_DWithin(a.geom, some_geom, 10)  -- 使用原始几何，索引有效
+  AND ST_Intersects(ST_Buffer(a.geom, 10), some_geom);  -- 精确验证
+-- 更简单
+SELECT *
+FROM land_parcels a
+WHERE ST_DWithin(a.geom::geography, some_geom::geography, 10);  -- 地理类型，单位：米
+-- 精确
+-- 如果确实需要缓冲区交集，使用组合条件
+-- EXPLAIN ANALYZE  -- 查看执行计划
+SELECT *
+FROM land_parcels a
+WHERE
+  -- 阶段1：索引过滤（快）
+  a.geom && ST_Buffer(some_geom, 10)  -- 反转：对查询几何做缓冲区
+  AND
+  -- 阶段2：精确计算（慢，但数据量已减少）
+  ST_Intersects(ST_Buffer(a.geom, 10), some_geom);
+```
+
+#### 索引友好函数
+
+```sql
+-- 这些函数被PostGIS特殊优化，可以使用索引：
+WHERE ST_Intersects(a.geom, some_geom)
+WHERE ST_Contains(a.geom, some_geom)
+WHERE ST_Within(a.geom, some_geom)
+WHERE ST_DWithin(a.geom, some_geom, 10)  -- 特殊优化！
+WHERE ST_Covers(a.geom, some_geom)
+WHERE ST_CoveredBy(a.geom, some_geom)
+
+-- 原理：这些函数内部被重写为使用 && 等索引操作符
+```
+
+#### 可能失效函数
+
+```sql
+-- 这些函数通常会使索引失效，除非创建函数索引：
+
+-- 1. 几何转换函数
+WHERE ST_Transform(a.geom, 3857) && some_geom  -- 失效！
+-- 需要：CREATE INDEX idx_transform ON table USING GIST (ST_Transform(geom, 3857))
+
+-- 2. 几何处理函数
+WHERE ST_Simplify(a.geom, 0.01) && some_geom  -- 失效！
+WHERE ST_SnapToGrid(a.geom, 0.1) && some_geom  -- 失效！
+
+-- 3. 几何生成函数
+WHERE ST_Buffer(a.geom, 10) && some_geom  -- 失效！
+WHERE ST_ConvexHull(a.geom) && some_geom  -- 失效！
+```
+
+#### 永远失效函数
+
+```sql
+-- 这些函数因为需要计算属性，无法使用空间索引：
+WHERE ST_Area(a.geom) > 1000  -- 失效（计算面积）
+WHERE ST_Length(a.geom) > 50   -- 失效（计算长度）
+WHERE ST_Perimeter(a.geom) < 100  -- 失效
+WHERE ST_NumGeometries(a.geom) > 1  -- 失效
+```
+
+#### 索引失效规则
+
+> 规则 1：是否改变几何的坐标或形状？
+
+```sql
+-- ❌ 改变几何：索引失效
+ST_Buffer(geom, ...)      -- 改变形状
+ST_Transform(geom, ...)   -- 改变坐标
+ST_Simplify(geom, ...)    -- 改变顶点
+
+-- ✅ 不改变几何：可能使用索引
+ST_Envelope(geom)         -- 只是计算属性，不改变存储
+ST_Centroid(geom)         -- 生成新点，不改变原几何
+```
+
+> 规则 2：是否被 PostGIS 特殊优化？
+
+```sql
+-- ✅ 这些函数有特殊优化：
+ST_Intersects(geom, other)   -- 优化为：geom && other + 精确计算
+ST_DWithin(geom, other, d)   -- 优化为：geom && ST_Expand(other, d)
+
+-- ❌ 这些没有优化：
+ST_Buffer(geom, d) && other  -- 没有特殊优化
+```
+
+> 规则 3：是否在索引列上使用函数？
+
+```sql
+-- 原始列有索引：geom 有 GiST 索引
+
+-- ✅ 直接使用列：索引有效
+WHERE geom && some_bbox
+
+-- ❌ 包装函数：索引失效（除非有函数索引）
+WHERE ST_Buffer(geom, 10) && some_bbox
+WHERE some_function(geom) && some_bbox
+```
+
+> 验证
+
+```sql
+-- 测试1：不修改几何的函数
+EXPLAIN ANALYZE
+SELECT * FROM land_parcels a
+WHERE ST_Intersects(a.geom, some_geom);
+-- 结果：Index Scan（索引有效）
+
+-- 测试2：修改几何的函数
+EXPLAIN ANALYZE
+SELECT * FROM land_parcels a
+WHERE ST_Intersects(ST_Buffer(a.geom, 10), some_geom);
+-- 结果：Seq Scan（索引失效）
+
+-- 测试3：计算属性的函数
+EXPLAIN ANALYZE
+SELECT * FROM land_parcels a
+WHERE ST_Area(a.geom) > 1000;
+-- 结果：Seq Scan（索引失效）
+```
+
+> 特殊情况, 函数索引与组合索引
+
+```sql
+-- 创建函数索引后，"修改几何"的函数也能用索引
+CREATE INDEX idx_land_buffer ON land_parcels USING GIST (ST_Buffer(geom, 10));
+
+-- 现在这个查询就能用索引了！
+EXPLAIN ANALYZE
+SELECT * FROM land_parcels a
+WHERE ST_Intersects(ST_Buffer(a.geom, 10), some_geom);
+-- 结果：Index Scan using idx_land_buffer
+
+-- 复合索引：原始几何 + 缓冲区几何
+CREATE INDEX idx_land_combo ON land_parcels USING GIST (geom, ST_Buffer(geom, 10));
+
+-- 两个查询都能用索引：
+WHERE ST_Intersects(a.geom, some_geom)  -- 使用第一个字段
+WHERE ST_Intersects(ST_Buffer(a.geom, 10), some_geom)  -- 使用第二个字段
+```
+
+#### 索引的原理
+
+1. **快速缩小范围**：先用简单的、索引友好的条件过滤掉大部分数据
+2. **延迟复杂计算**：对剩余的小部分数据再做复杂的、耗时的计算
+3. **选择性顺序**：把过滤性最强的条件放在最前面
+4. **避免全表计算**：不要让每行数据都经过复杂函数计算
+
+**PostGIS 的最佳实践**：
+
+```sql
+-- ✅ 正确模式：索引过滤 → 精确计算
+SELECT *
+FROM spatial_table
+WHERE simple_indexed_condition   -- 使用索引快速过滤
+  AND complex_spatial_function   -- 对少量数据精确计算
+  AND other_conditions;          -- 其他条件
+```
+
+---
+
+### 🧠 Part 5（30 min）常见性能坑（非常重要）
+
+#### ⚠️ 坑 1：geometry / geography 混用
+
+```sql
+-- ❌ 会导致无法用索引
+ST_Intersects(geom::geography, other_geom::geography)
+```
+
+👉 geography 计算 **慢 + 索引有限**
+
+---
+
+#### ⚠️ 坑 2：坐标系不统一
+
+```sql
+-- ❌ SRID 不一致，索引直接失效
+ST_Intersects(geom_4326, geom_3857)
+```
+
+👉 必须先 `ST_Transform`
+
+---
+
+#### ⚠️ 坑 3：不用 BBox 预筛选
+
+高级优化（了解即可）：
+
+```sql
+WHERE geom && other_geom
+AND ST_Intersects(geom, other_geom)
+```
+
+---
+
+### 🧪 今日实战任务（Checklist）
+
+#### ✔️ 任务 1
+
+给所有空间表建立 GiST 索引
+
+#### ✔️ 任务 2
+
+用 `EXPLAIN ANALYZE` 对比：
+
+- 有索引
+- 无索引
+
+#### ✔️ 任务 3
+
+写一条 **“索引友好”** 的图斑相交 SQL
+
+---
+
+### 🏁 今日结束后，你已经具备：
+
+- **生产级 PostGIS 查询的性能意识**
+- 能判断「慢在哪」「为什么慢」
+- 不会写出灾难级 GIS SQL
+
+👉 **到这一步，你已经超过 70% 的“只会用 PostGIS”的人了**
+
+---
+
+如果你愿意，我可以继续带你完成：
+
+#### 👉 **第 6 天：前端 ↔ PostGIS 联动（Node.js + GeoJSON + 地图渲染）**
+
+这一天开始，把你前端优势真正发挥出来 👌
+要继续吗？

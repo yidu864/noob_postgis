@@ -174,13 +174,12 @@ FROM jsonb_array_elements(
     }
   ]
 }
-
 '::jsonb->'features'
 ) AS feature;
--- 导入数据 reads
+-- 导入数据 roads
 INSERT INTO "public".learn_table (feature_name, geom_linestring)
 SELECT
-  CONCAT_WS('-', 'pois', feature->'properties'->>'name') as feature_name,
+  CONCAT_WS('-', 'roads', feature->'properties'->>'name') as feature_name,
   ST_SetSRID(
     ST_GeomFromGeoJSON(feature->'geometry'),  -- 关键修正：传入整个geometry对象
     4326
