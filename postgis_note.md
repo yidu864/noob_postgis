@@ -30,7 +30,7 @@ docker.m.daocloud.io/library/busybox
 docker run --name postgis -e POSTGRES_PASSWORD=123456 -p 5432:5432 -d postgis/postgis
 ```
 
-### 安装 pgadmin / dbeaver
+### 安装 pgadmin / dbeaver / ogr2ogr
 
 二选一即可, 两者都是具备 GIS 数据可视化的数据库管理工具
 
@@ -242,9 +242,7 @@ ST_Intersects(a.geom, b.geom)  -- 实际上被优化为 && + 精确计算
 
 ## 导入数据
 
-### geojson
-
-#### 用 sql
+### 用 sql
 
 ```sql
 INSERT INTO "public".learn_table (feature_name, geom_linestring)
@@ -276,7 +274,7 @@ FROM jsonb_array_elements(
 ) AS feature;
 ```
 
-#### 用 ogr2ogr
+### 用 ogr2ogr
 
 > 需要安装 gdal, 推荐 docker 或者 miniconda 安装
 
@@ -300,6 +298,12 @@ gdal --version
 ```
 
 不安装 gdal, 只安装 ogr2ogr 相关包 [前往 gisinternals](https://www.gisinternals.com/development.php)
+
+> 导入 shp
+
+```bash
+ogr2ogr   -nln nyc_census_blocks_2000   -nlt PROMOTE_TO_MULTI   -lco GEOMETRY_NAME=geom   -lco FID=gid   -lco PRECISION=NO   -progress   Pg:"dbname=nyc host=localhost user=postgres port=9901"   ./nyc_census_blocks_2000.shp
+```
 
 ## 索引,性能,优化
 
