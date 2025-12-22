@@ -64,7 +64,16 @@ conda 安装, 需要至少 py3.11 环境
 conda create -n 虚拟环境名 python=3.11
 conda activate 虚拟环境名
 conda install conda-forge::gdal
+gdal --version
+ogr2ogr --version
+# gdal 的 pg 驱动
+conda install libgdal-pg
 ```
+
+不安装 gdal, 只安装 ogr2ogr 相关包 [前往 gisinternals](https://www.gisinternals.com/development.php)
+
+> 注意, 如果用的是构建好的工具包, 需要先运行 sdk_install.cmd, 准备好环境<br />
+> 理论上是不会污染系统变量, 但是实践中似乎会导致 navicat 闪退?
 
 ## 基本类型
 
@@ -276,33 +285,32 @@ FROM jsonb_array_elements(
 
 ### 用 ogr2ogr
 
-> 需要安装 gdal, 推荐 docker 或者 miniconda 安装
-
-使用 docker 安装最简单, 但是要做目录映射, 在 win 环境不友好
-
-```bash
-docker run --rm -it \
-  -v /本地/数据目录:/data \
-  --network="host" \
-  osgeo/gdal:ubuntu-full-latest \
-  ogr2ogr -f "PostgreSQL" PG:"host=host.docker.internal dbname=你的数据库 user=你的用户 password=你的密码" /data/your_shapefile.shp -nln 新表名
-```
-
-conda 安装, 需要至少 py3.11 环境, 且需要使用国内源
-
-```bash
-conda create -n 虚拟环境名 python=3.11
-conda activate 虚拟环境名
-conda install conda-forge::gdal
-gdal --version
-```
-
-不安装 gdal, 只安装 ogr2ogr 相关包 [前往 gisinternals](https://www.gisinternals.com/development.php)
-
 > 导入 shp
 
+参数解析:
+
+1. `-nln` 表名
+2. `-nlt` 选项代表“新图层类型”。特别是对于 shape 文件输入，新图层类型通常是“多部分几何”，因此系统需要事先告知使用“MultiPolygon”而不是“Polygon”作为几何类型。
+3. `-lco` 选项代表“图层创建选项”。不同的驱动程序具有不同的创建选项，我们在这里使用了 PostgreSQL 驱动程序 的三个选项。
+
+   **GEOMETRY_NAME**设置几何列的列名。我们倾向于使用"geom"而不是默认值，以使我们的表与研讨会中的标准列名匹配。
+
+   **FID**设置主键列名。同样，我们更喜欢使用"gid"，这是研讨会中使用的标准。
+
+   **PRECISION**控制数字字段在数据库中的表示方式。在加载 shape 文件时，默认情况下使用数据库的“numeric”类型，这更精确，但有时比“integer”和“double precision”等简单数值类型更难处理。我们使用"NO"来关闭"numeric"类型。
+
+4. `-progress` 展示进度
+5. `-t_src EPSG:4326` 转换 shp 文件中默认的坐标系
+6. `Pg:"dbname=nyc host=localhost user=postgres port=8096 password=123456` postgre 连接串
+7. `nyc_census_blocks_2000.shp` shp 文件
+
+8. `-skipfailures` 遇到错误要素时跳过，继续执行，防止单个错误导致整个任务失败。
+9. `-append` 追加而不是新建表
+10. `-update` 会尝试根据关键字更新
+11. `-where "POPULATION > 1000"` 条件导入
+
 ```bash
-ogr2ogr   -nln nyc_census_blocks_2000   -nlt PROMOTE_TO_MULTI   -lco GEOMETRY_NAME=geom   -lco FID=gid   -lco PRECISION=NO   -progress   Pg:"dbname=nyc host=localhost user=postgres port=9901"   ./nyc_census_blocks_2000.shp
+ogr2ogr   -nln nyc_census_blocks_2000   -nlt PROMOTE_TO_MULTI   -lco GEOMETRY_NAME=geom   -lco FID=gid   -lco PRECISION=NO   Pg:"dbname=nyc host=localhost user=postgres port=8096 password=123456" -progress -t_srs EPSG:4326  E:\MineSoft\noob_postgis\.database\postgis-workshop\data\2000\nyc_census_blocks_2000.shp
 ```
 
 ## 索引,性能,优化
@@ -831,20 +839,3 @@ AND ST_Intersects(geom, other_geom)
 写一条 **“索引友好”** 的图斑相交 SQL
 
 ---
-
-### 🏁 今日结束后，你已经具备：
-
-- **生产级 PostGIS 查询的性能意识**
-- 能判断「慢在哪」「为什么慢」
-- 不会写出灾难级 GIS SQL
-
-👉 **到这一步，你已经超过 70% 的“只会用 PostGIS”的人了**
-
----
-
-如果你愿意，我可以继续带你完成：
-
-#### 👉 **第 6 天：前端 ↔ PostGIS 联动（Node.js + GeoJSON + 地图渲染）**
-
-这一天开始，把你前端优势真正发挥出来 👌
-要继续吗？
