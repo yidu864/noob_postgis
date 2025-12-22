@@ -75,6 +75,10 @@ conda install libgdal-pg
 > 注意, 如果用的是构建好的工具包, 需要先运行 sdk_install.cmd, 准备好环境<br />
 > 理论上是不会污染系统变量, 但是实践中似乎会导致 navicat 闪退?
 
+### QGIS
+
+开源地理数据分析工具, [下载](https://qgis.org/download/)
+
 ## 基本类型
 
 - POINT
@@ -283,6 +287,62 @@ FROM jsonb_array_elements(
 ) AS feature;
 ```
 
+### shp 类型的文件
+
+SHP 文件（Shapefile）是一种常见的地理空间矢量数据格式，它实际上由**至少三个必需文件**组成，有时还会有更多辅助文件。
+
+#### 📁 核心文件结构（必需）
+
+| 文件扩展名 | 用途             | 重要性                                                              |
+| :--------- | :--------------- | :------------------------------------------------------------------ |
+| **`.shp`** | **主体图形文件** | **必需**。存储几何图形本身（点、线、面等的坐标）。                  |
+| **`.shx`** | **图形索引文件** | **必需**。存储`.shp`中几何体的位置索引，用于快速访问。              |
+| **`.dbf`** | **属性数据文件** | **必需**。以 dBase 格式存储几何体对应的属性信息（如名称、面积等）。 |
+
+这三个文件必须**同名且在同一目录下**。如果缺少任何一个，大部分 GIS 软件都无法正确读取数据。例如，一个名为`fujian_roads`的 Shapefile，其文件夹内必须包含：
+
+- `fujian_roads.shp`
+- `fujian_roads.shx`
+- `fujian_roads.dbf`
+
+#### 🔧 常见辅助文件
+
+除了上述三个核心文件，还可能存在以下文件，它们为数据提供额外信息：
+
+| 文件扩展名          | 用途                                                                                                                                |
+| :------------------ | :---------------------------------------------------------------------------------------------------------------------------------- |
+| **`.prj`**          | **坐标系统文件**。非常重要，它以文本形式定义了数据的坐标系（如 WGS84、GCJ-02 等）。没有它，GIS 软件无法将数据定位到正确的地理位置。 |
+| **`.cpg`**          | **字符编码说明文件**。用于指定`.dbf`文件的编码（如 UTF-8、GBK），防止中文字段乱码。                                                 |
+| **`.sbn` / `.sbx`** | 空间索引文件，用于加快空间查询速度。由某些 GIS 软件（如 ArcGIS）自动生成。                                                          |
+| **`.shp.xml`**      | 元数据文件，以 XML 格式描述数据集的来源、精度等信息。                                                                               |
+
+#### 📄 内部结构示例
+
+以“福建省行政区划”数据为例，它的 `.dbf` 文件（属性表）可能包含如下字段：
+
+| OBJECTID | NAME   | CODE   | AREA     | ... |
+| :------- | :----- | :----- | :------- | :-- |
+| 1        | 福州市 | 350100 | 12109.47 | ... |
+| 2        | 厦门市 | 350200 | 1699.39  | ... |
+| 3        | 莆田市 | 350300 | 4119.02  | ... |
+
+而这个 `.dbf` 表中的每一行，都通过内部 ID 与 `.shp` 文件中对应的一条几何图形（如福州市的多边形边界）**严格关联**。`.shx` 文件则记录了这条多边形在 `.shp` 文件中的具体存储位置，以便快速读取。
+
+#### 🛠️ 如何处理 SHP 文件？
+
+理解了结构，操作就很简单了：
+
+1.  **永远以“文件包”形式处理**：在复制、移动或分享时，务必确保所有相关文件（至少 `.shp`, `.shx`, `.dbf`）一起操作。
+2.  **导入 PostGIS**：
+    - **使用`shp2pgsql`工具**（PostGIS 自带命令行工具）：
+      ```bash
+      shp2pgsql -s 4326 -W GBK /path/to/fujian_roads.shp fujian_roads | psql -d your_database
+      ```
+      - `-s 4326`：指定目标 SRID（如果 `.prj` 存在，可以先用 `-D` 参数自动探测）
+      - `-W GBK`：如果属性表含中文，通常需指定 GBK 编码
+    - **使用 QGIS**：在 QGIS 中加载 SHP 图层后，通过右键菜单“导出” -> “要素存储为”，选择 PostgreSQL 连接，即可直观导入。
+    - **ogr2ogr**: 详见下一个小节
+
 ### 用 ogr2ogr
 
 > 导入 shp
@@ -300,7 +360,7 @@ FROM jsonb_array_elements(
    **PRECISION**控制数字字段在数据库中的表示方式。在加载 shape 文件时，默认情况下使用数据库的“numeric”类型，这更精确，但有时比“integer”和“double precision”等简单数值类型更难处理。我们使用"NO"来关闭"numeric"类型。
 
 4. `-progress` 展示进度
-5. `-t_src EPSG:4326` 转换 shp 文件中默认的坐标系
+5. `-t_srs EPSG:4326` 转换 shp 文件中默认的坐标系
 6. `Pg:"dbname=nyc host=localhost user=postgres port=8096 password=123456` postgre 连接串
 7. `nyc_census_blocks_2000.shp` shp 文件
 
@@ -309,21 +369,17 @@ FROM jsonb_array_elements(
 10. `-update` 会尝试根据关键字更新
 11. `-where "POPULATION > 1000"` 条件导入
 
+```sql
+-- 要给对应的数据库开启 postgis 扩展, 否则无法导入
+CREATE EXTENSION postgis;
+SELECT postgis_full_version();
+```
+
 ```bash
 ogr2ogr   -nln nyc_census_blocks_2000   -nlt PROMOTE_TO_MULTI   -lco GEOMETRY_NAME=geom   -lco FID=gid   -lco PRECISION=NO   Pg:"dbname=nyc host=localhost user=postgres port=8096 password=123456" -progress -t_srs EPSG:4326  E:\MineSoft\noob_postgis\.database\postgis-workshop\data\2000\nyc_census_blocks_2000.shp
 ```
 
 ## 索引,性能,优化
-
-### 🎯 学习目标
-
-1. 理解 **为什么空间查询慢**
-2. 正确创建 **GiST 空间索引**
-3. 使用 `EXPLAIN ANALYZE` 判断是否命中索引
-4. 写出 **“可被索引使用”** 的空间 SQL
-5. 知道常见 **性能坑**（非常重要）
-
----
 
 ### 🧠 Part 1（30 min）空间索引原理（必须理解）
 
