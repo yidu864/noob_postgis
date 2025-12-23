@@ -88,3 +88,7 @@ ALTER TABLE nyc_neighborhoods
 SELECT name, ST_GeometryType(geom), ST_NDims(geom), ST_SRID(geom)
   FROM geometries;
 ```
+
+### 几何类型
+
+见 [Note.md](../postgis_note.md#几何类型)

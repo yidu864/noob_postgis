@@ -79,15 +79,440 @@ conda install libgdal-pg
 
 开源地理数据分析工具, [下载](https://qgis.org/download/)
 
-## 基本类型
+## 导入数据
 
-- POINT
-- LINESTRING
-- POLYGON
+### 用 sql
 
-### 数据类型
+```sql
+INSERT INTO "public".learn_table (feature_name, geom_linestring)
+SELECT
+  CONCAT_WS('-', 'pois', feature->'properties'->>'name') as feature_name,
+  ST_SetSRID(
+    ST_GeomFromGeoJSON(feature->'geometry'),  -- 关键修正：传入整个geometry对象
+    4326
+  ) AS geom_polygon
+FROM jsonb_array_elements(
+  '{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": { "name": "中山高速公路" },
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [121.3, 25.1],
+          [121.55, 25.05],
+          [121.7, 24.9]
+        ]
+      }
+    }
+  ]
+}
+'::jsonb->'features'
+) AS feature;
+```
 
-- GEOMETRY(Point, 4326)， epsg4326 坐标系的点数据
+### shp 类型的文件
+
+SHP 文件（Shapefile）是一种常见的地理空间矢量数据格式，它实际上由**至少三个必需文件**组成，有时还会有更多辅助文件。
+
+#### 📁 核心文件结构（必需）
+
+| 文件扩展名 | 用途             | 重要性                                                              |
+| :--------- | :--------------- | :------------------------------------------------------------------ |
+| **`.shp`** | **主体图形文件** | **必需**。存储几何图形本身（点、线、面等的坐标）。                  |
+| **`.shx`** | **图形索引文件** | **必需**。存储`.shp`中几何体的位置索引，用于快速访问。              |
+| **`.dbf`** | **属性数据文件** | **必需**。以 dBase 格式存储几何体对应的属性信息（如名称、面积等）。 |
+
+这三个文件必须**同名且在同一目录下**。如果缺少任何一个，大部分 GIS 软件都无法正确读取数据。例如，一个名为`fujian_roads`的 Shapefile，其文件夹内必须包含：
+
+- `fujian_roads.shp`
+- `fujian_roads.shx`
+- `fujian_roads.dbf`
+
+#### 🔧 常见辅助文件
+
+除了上述三个核心文件，还可能存在以下文件，它们为数据提供额外信息：
+
+| 文件扩展名          | 用途                                                                                                                                |
+| :------------------ | :---------------------------------------------------------------------------------------------------------------------------------- |
+| **`.prj`**          | **坐标系统文件**。非常重要，它以文本形式定义了数据的坐标系（如 WGS84、GCJ-02 等）。没有它，GIS 软件无法将数据定位到正确的地理位置。 |
+| **`.cpg`**          | **字符编码说明文件**。用于指定`.dbf`文件的编码（如 UTF-8、GBK），防止中文字段乱码。                                                 |
+| **`.sbn` / `.sbx`** | 空间索引文件，用于加快空间查询速度。由某些 GIS 软件（如 ArcGIS）自动生成。                                                          |
+| **`.shp.xml`**      | 元数据文件，以 XML 格式描述数据集的来源、精度等信息。                                                                               |
+
+#### 📄 内部结构示例
+
+以“福建省行政区划”数据为例，它的 `.dbf` 文件（属性表）可能包含如下字段：
+
+| OBJECTID | NAME   | CODE   | AREA     | ... |
+| :------- | :----- | :----- | :------- | :-- |
+| 1        | 福州市 | 350100 | 12109.47 | ... |
+| 2        | 厦门市 | 350200 | 1699.39  | ... |
+| 3        | 莆田市 | 350300 | 4119.02  | ... |
+
+而这个 `.dbf` 表中的每一行，都通过内部 ID 与 `.shp` 文件中对应的一条几何图形（如福州市的多边形边界）**严格关联**。`.shx` 文件则记录了这条多边形在 `.shp` 文件中的具体存储位置，以便快速读取。
+
+#### 🛠️ 如何处理 SHP 文件？
+
+理解了结构，操作就很简单了：
+
+1.  **永远以“文件包”形式处理**：在复制、移动或分享时，务必确保所有相关文件（至少 `.shp`, `.shx`, `.dbf`）一起操作。
+2.  **导入 PostGIS**：
+    - **使用`shp2pgsql`工具**（PostGIS 自带命令行工具）：
+      ```bash
+      shp2pgsql -s 4326 -W GBK /path/to/fujian_roads.shp fujian_roads | psql -d your_database
+      ```
+      - `-s 4326`：指定目标 SRID（如果 `.prj` 存在，可以先用 `-D` 参数自动探测）
+      - `-W GBK`：如果属性表含中文，通常需指定 GBK 编码
+    - **使用 QGIS**：在 QGIS 中加载 SHP 图层后，通过右键菜单“导出” -> “要素存储为”，选择 PostgreSQL 连接，即可直观导入。
+    - **ogr2ogr**: 详见下一个小节
+
+### 用 ogr2ogr
+
+> 导入 shp
+
+参数解析:
+
+1. `-nln` 表名
+2. `-nlt` 选项代表“新图层类型”。特别是对于 shape 文件输入，新图层类型通常是“多部分几何”，因此系统需要事先告知使用“MultiPolygon”而不是“Polygon”作为几何类型。
+3. `-lco` 选项代表“图层创建选项”。不同的驱动程序具有不同的创建选项，我们在这里使用了 PostgreSQL 驱动程序 的三个选项。
+
+   **GEOMETRY_NAME**设置几何列的列名。我们倾向于使用"geom"而不是默认值，以使我们的表与研讨会中的标准列名匹配。
+
+   **FID**设置主键列名。同样，我们更喜欢使用"gid"，这是研讨会中使用的标准。
+
+   **PRECISION**控制数字字段在数据库中的表示方式。在加载 shape 文件时，默认情况下使用数据库的“numeric”类型，这更精确，但有时比“integer”和“double precision”等简单数值类型更难处理。我们使用"NO"来关闭"numeric"类型。
+
+4. `-progress` 展示进度
+5. `-t_srs EPSG:4326` 转换 shp 文件中默认的坐标系
+6. `Pg:"dbname=nyc host=localhost user=postgres port=8096 password=123456` postgre 连接串
+7. `nyc_census_blocks_2000.shp` shp 文件
+
+8. `-skipfailures` 遇到错误要素时跳过，继续执行，防止单个错误导致整个任务失败。
+9. `-append` 追加而不是新建表
+10. `-update` 会尝试根据关键字更新
+11. `-where "POPULATION > 1000"` 条件导入
+
+```sql
+-- 要给对应的数据库开启 postgis 扩展, 否则无法导入
+CREATE EXTENSION postgis;
+SELECT postgis_full_version();
+```
+
+```bash
+ogr2ogr   -nln nyc_census_blocks_2000   -nlt PROMOTE_TO_MULTI   -lco GEOMETRY_NAME=geom   -lco FID=gid   -lco PRECISION=NO   Pg:"dbname=nyc host=localhost user=postgres port=8096 password=123456" -progress -t_srs EPSG:4326  E:\MineSoft\noob_postgis\.database\postgis-workshop\data\2000\nyc_census_blocks_2000.shp
+```
+
+### 元数据
+
+根据 Simple Features for SQL (SFSQL)规范，PostGIS 提供了两个表来跟踪和报告给定数据库中可用的几何类型。
+
+- `spatial_ref_sys` 表定义了数据库中所有已知的空间参考系统
+- 视图`geometry_columns`，提供了所有“要素”（定义为具有几何属性的对象）的列表，以及这些要素的基本详细信息。
+
+```sql
+-- 看看里面有啥
+SELECT * FROM geometry_columns;
+```
+
+`f_table_catalog`、`f_table_schema`和`f_table_name`提供了包含给定几何图形的要素表的完全限定名称。因为 PostgreSQL 不使用目录，所以`f_table_catalog`通常为空。
+
+`f_geometry_column`是包含几何图形的列的名称——对于具有多个几何列的要素表，每个列将有一条记录。
+
+`coord_dimension`和`srid`分别定义了几何图形的维度（2、3 或 4 维）和引用`spatial_ref_sys`表的空间参考系统标识符。
+
+`type`列定义了下面描述的几何类型；到目前为止，我们已经看到了 Point 和 Linestring 类型。
+
+```sql
+-- 你的``nyc``表中的一部分或全部是否没有``srid``为26918？通过更新表格可以轻松解决这个问题。
+ALTER TABLE nyc_neighborhoods
+  ALTER COLUMN geom
+  TYPE Geometry(MultiPolygon, 26918)
+  USING ST_SetSRID(geom, 26918);
+```
+
+> 查询 geometry 类型,维数,srid
+
+```sql
+SELECT name, ST_GeometryType(geom), ST_NDims(geom), ST_SRID(geom)
+  FROM geometries;
+```
+
+## 几何类型
+
+以下使用的数据来自于[手册](./src/postgis_manual.md#下载数据)
+
+### 点
+
+`POINT(0 0)` 就是一个二维点,
+
+```sql
+-- geom, x坐标, y坐标
+SELECT long_name, ST_Transform(geom,4326), ST_X(geom),ST_Y(geom)
+  FROM nyc_subway_stations
+  LIMIT 100;
+```
+
+### 线
+
+`LINESTRING(0 0, 1 1, 2 1, 2 2)` 线串
+
+```sql
+SELECT ST_AsText(geom)
+  FROM geometries
+  WHERE name = 'Linestring';
+```
+
+一些用于处理 Linestring 的特定空间函数包括:
+
+- `ST_Length(geometry)` 返回 Linestring 的长度
+- `ST_StartPoint(geometry)` 返回第一个坐标作为一个点
+- `ST_EndPoint(geometry)` 返回最后一个坐标作为一个点
+- `ST_NPoints(geometry)` 返回 Linestring 中坐标的数量
+
+```sql
+SELECT name, st_transform(geom,4326), st_length(geom), st_startpoint(geom), st_endpoint(geom),st_npoints(geom)
+  FROM "public".nyc_streets
+  LIMIT 100;
+```
+
+### 多边形
+
+`POLYGON((0 0, 1 0, 1 1, 0 1, 0 0)),  POLYGON((0 0, 10 0, 10 10, 0 10, 0 0),(1 1, 1 2, 2 2, 2 1, 1 1))`
+
+一些用于处理多边形的特定空间函数包括:
+
+- `ST_Area(geometry)` 返回多边形的面积, 带有孔的多边形的面积是外壳的面积（一个 10x10 的正方形）减去孔的面积（一个 1x1 的正方形）。
+- `ST_NRings(geometry)` 返回环的数量（通常为 1，如果有孔则更多）
+- `ST_ExteriorRing(geometry)` 返回外环作为一个 Linestring
+- `ST_InteriorRingN(geometry,n)` 返回指定的内部环作为一个 Linestring
+- `ST_Perimeter(geometry)` 返回所有环的长度
+
+```sql
+SELECT name,ST_AsText(geom)
+  FROM geometries
+  WHERE name LIKE 'Polygon%';
+
+SELECT name,st_area(geom),st_nrings(geom),st_exteriorring(geom),st_interiorringn(geom, 1),st_perimeter(geom)
+  FROM geometries
+  WHERE name LIKE 'Polygon%';
+```
+
+### 集合 MULTI-XXX
+
+有四种集合类型，它们将多个简单几何图形分组成集合。
+
+- MultiPoint，一组点
+- MultiLineString，一组线串
+- MultiPolygon，一组多边形
+- GeometryCollection，任何几何图形的异构集合（包括其他集合）
+
+一些用于处理集合的特定空间函数包括:
+
+- `ST_NumGeometries(geometry)` 返回集合中的部分数量
+- `ST_GeometryN(geometry,n)` 返回指定的部分, 索引从 0 开始
+- `ST_Area(geometry)` 返回所有多边形部分的总面积
+- `ST_Length(geometry)` 返回所有线性部分的总长度
+
+```sql
+SELECT name, (geom), st_numgeometries(geom), st_geometryn(geom, 1), st_length(geom)
+  FROM geometries
+  WHERE name = 'Collection';
+```
+
+### 几何的输入输出
+
+在数据库中，几何图形以一种仅由 PostGIS 程序使用的格式存储在磁盘上。为了让外部程序插入和检索有用的几何图形，它们需要转换成其他应用程序能够理解的格式。幸运的是，PostGIS 支持在大量格式中发出和消耗几何图形:
+
+- Well-known text (WKT)
+  - `st_GeomFromText(text, srid)` 返回 geometry
+  - `st_AsText(geometry)` 返回 text
+  - `st_AsEWKT(geometry)` 返回 text
+- Well-known binary (WKB)
+  - `st_GeomFromWKB(bytea)` 返回 geometry
+  - `st_AsBinary(geometry)` 返回 bytea
+  - `st_AsEWKB(geometry)` 返回 bytea
+- Geographic Mark-up Language (GML)
+  - `st_GeomFromGML(text)` 返回 geometry
+  - `st_AsGML(geometry)` 返回 text
+- Keyhole Mark-up Language (KML)
+  - `st_GeomFromKML(text)` 返回 geometry
+  - `st_AsKML(geometry)` 返回 text
+- GeoJSON
+  - `st_AsGeoJSON(geometry)` 返回 text
+- 可伸缩矢量图形 (SVG)
+  - `st_AsSVG(geometry)` 返回 text
+
+构造函数最常见的用途是将几何图形的文本表示转换为内部表示, 如需展示, 必须设置 srid
+
+```sql
+SELECT encode(
+  ST_AsBinary(ST_GeometryFromText('LINESTRING(0 0,1 0)')),
+  'hex');
+SELECT ST_AsText(ST_GeometryFromText('LINESTRING(0 0 0,1 0 0,1 1 2)'));
+
+-- 除了ST_GeometryFromText 函数之外，还有许多其他方法可以从常用文本或类似格式的输入创建几何图形:
+-- Using ST_GeomFromText with the SRID parameter
+SELECT ST_GeomFromText('POINT(2 2)',4326);
+
+-- Using ST_GeomFromText without the SRID parameter
+SELECT ST_SetSRID(ST_GeomFromText('POINT(2 2)'),4326);
+
+-- Using a ST_Make* function
+SELECT ST_SetSRID(ST_MakePoint(2, 2), 4326);
+
+-- Using PostgreSQL casting syntax and ISO WKT
+SELECT ST_SetSRID('POINT(2 2)'::geometry, 4326);
+
+-- Using PostgreSQL casting syntax and extended WKT
+SELECT 'SRID=4326;POINT(2 2)'::geometry;
+```
+
+> 除了各种形式的发射器（WKT、WKB、GML、KML、JSON、SVG）之外，PostGIS 还具有四个消费者（WKT、WKB、GML、KML）。大多数应用程序使用 WKT 或 WKB 几何创建函数，但其他函数也可用。下面是一个消费 GML 并输出 JSON 的示例
+
+```sql
+SELECT ST_AsGeoJSON(ST_GeomFromGML('<gml:Point><gml:coordinates>1,1</gml:coordinates></gml:Point>'));
+```
+
+### 从文本中解析
+
+postgre 可以用 `old::new` 的方式直接转换类型 , 如
+
+```sql
+SELECT 0.9::text;
+SELECT 'POINT(0 0)'::geometry;
+SELECT 'SRID=4326;POINT(0 0)'::geometry;
+```
+
+### 实践操作
+
+```sql
+-- “West Village”社区的面积是多少？
+SELECT gid, "name", st_area(geom) FROM nyc_neighborhoods nnb WHERE nnb."name" = 'West Village';
+
+-- Pelham St "佩勒姆街"的几何类型是什么？长度是多少？
+SELECT gid, st_geometrytype(geom), st_length(geom) from nyc_streets ns WHERE ns."name" = 'Pelham St'
+
+-- "Broad St"地铁站的GeoJSON表示是什么？
+SELECT gid, "name", st_asgeojson(geom) FROM nyc_subway_stations nss WHERE nss."name" = 'Broad St' LIMIT 100;
+
+-- 纽约市的街道总长度（公里）是多少？（提示：空间数据的测量单位是米，一公里有1000米。）
+SELECT sum(st_length(geom))/1000 from nyc_streets;
+
+-- Manhattan 的面积是多少英亩？ （提示：nyc_census_blocks 和 nyc_neighborhoods``中都有一个 ``boroname。）
+SELECT sum(st_area(geom))/4047 FROM nyc_neighborhoods WHERE boroname = 'Manhattan';
+
+-- 最西的地铁站是哪个？
+SELECT gid, "name", st_x(geom) FROM nyc_subway_stations ORDER BY st_x(geom) LIMIT 1;
+
+-- “Columbus Cir” 有多长？
+SELECT st_length(geom) FROM nyc_streets WHERE name = 'Columbus Cir';
+
+-- 按类型总结，纽约市的街道长度是多少？
+SELECT "type", sum(st_length(geom)) as length from nyc_streets GROUP BY "type" ORDER BY length asc;
+```
+
+## 空间类型
+
+### ST_Equals
+
+`ST_Equals(geometry A, geometry B)` 用于检测两个几何图形的拓扑相等性。必须坐标完全一致, 才能判定拓扑相等(位置与形状完全重合)
+
+```sql
+SELECT name
+FROM nyc_subway_stations
+WHERE ST_Equals(
+  geom,
+  '0101000020266900000EEBD4CF27CF2141BC17D69516315141');
+-- Broad St
+```
+
+### ST_Intersects, ST_Disjoint, ST_Crosses and ST_Overlaps
+
+`ST_Intersects`、`ST_Crosses`和 `ST_Overlaps` 用于检测几何图形内部区域是否发生相交。
+
+![图片](https://postgis.net/workshops/zh_Hans/postgis-intro/_images/st_intersects.png)
+
+`ST_Intersects(geometry A, geometry B)` 当两个图形存在任意空间交集时返回 t（TRUE），即边界或内部发生相交即视为满足条件。
+
+![图片](https://postgis.net/workshops/zh_Hans/postgis-intro/_images/st_disjoint.png)
+
+与 `ST_Intersects` 相对的是 `ST_Disjoint(geometry A , geometry B)`。若两个几何图形互不相交(disjoint)，则它们不存在任何空间交集，反之亦然。实际上，测试"不相交"(not intersects)通常比直接测试"相离"(disjoint)更高效——因为相交测试可利用空间索引优化，而相离测试则无法利用索引。
+
+![图片](https://postgis.net/workshops/zh_Hans/postgis-intro/_images/st_crosses.png)
+
+`ST_Crosses(geometry A, geometry B)` 用于以下几何类型组合的比对：
+
+- 多点/多边形、多点/线串、线串/线串、线串/多边形、线串/多多边形。
+
+当同时满足：
+
+1.  交集结果的几何维度比两个源几何的最大维度小
+1.  该交集同时位于两个源几何内部时，函数返回 TRUE。
+
+![图片](https://postgis.net/workshops/zh_Hans/postgis-intro/_images/st_overlaps.png)
+
+`ST_Overlaps(geometry A, geometry B)` 用于比对两个同维度几何图形，当满足以下条件时返回 TRUE
+
+以下是通过 :command:`ST_Intersects`函数确定「Broad Street」地铁站所属行政辖区的示例：
+
+SELECT name, ST_AsText(geom)
+FROM nyc_subway_stations
+WHERE name = 'Broad St';
+POINT(583571 4506714)
+SELECT name, boroname
+FROM nyc_neighborhoods
+WHERE ST_Intersects(geom, ST_GeomFromText('POINT(583571 4506714)',26918));
+name | boroname
+--------------------+-----------
+Financial District | Manhattan
+11.3. ST_Touches
+:command:`ST_Touches`用于检测两个几何图形是否边界接触但内部无交集
+
+![图片](https://postgis.net/workshops/zh_Hans/postgis-intro/_images/st_touches.png)
+ST_Touches(geometry A, geometry B) 当满足以下任一条件时返回 TRUE：两个几何图形的边界存在交集；仅其中一个几何图形的内部与另一个图形的边界相交。
+
+11.4. ST_Within 和 ST_Contains
+ST_Within 与 ST_Contains 用于检测两个几何图形之间的完全包含关系。
+
+![图片](https://postgis.net/workshops/zh_Hans/postgis-intro/_images/st_within.png)
+ST_Within(geometry A , geometry B) 当第一个几何图形完全包含于第二个几何图形时返回 TRUE。该函数与 :command:ST_Contains 的检测结果互为逆反关系。
+
+:command:`ST_Contains(geometry A, geometry B)`当第二个几何图形完全被包含于第一个几何图形内部时返回 TRUE。
+
+11.5. ST_Distance 和 ST_DWithin
+GIS 领域中一个极其常见的问题是："找出与指定对象距离在 X 范围内的所有要素"。
+
+ST_Distance(geometry A, geometry B) 用于计算两个几何图形之间的最短距离，并以浮点数形式返回结果。该函数特别适用于需要精确报告对象间距离的场景。
+
+SELECT ST_Distance(
+ST_GeometryFromText('POINT(0 5)'),
+ST_GeometryFromText('LINESTRING(-2 2, 2 2)'));
+3
+ST_DWithin 函数提供基于索引加速的布尔距离检测，用于判断两个对象是否处于指定距离范围内。该函数特别适用于诸如"道路 500 米范围内有多少树木"这类空间分析场景——无需实际生成缓冲区，仅需测试距离关系即可获得结果。
+
+![图片](https://postgis.net/workshops/zh_Hans/postgis-intro/_images/st_dwithin.png)
+以下是通过空间查询查找 Broad Street 地铁站周边 10 米范围内街道的 SQL 示例：
+
+SELECT name
+FROM nyc_streets
+WHERE ST_DWithin(
+geom,
+ST_GeomFromText('POINT(583571 4506714)',26918),
+10
+);
+name
+
+---
+
+Wall St
+Broad St
+Nassau St
+我们可通过地图验证该结论：Broad St 地铁站实际位于 Wall Street、Broad Street 和 Nassau Street 三条道路的交汇处。
+
+![图片](//postgis.net/workshops/zh_Hans/postgis-intro/\_images/broad_st.jpg
 
 ## 常用函数
 
@@ -251,132 +676,6 @@ ST_Within(a.geom, b.geom)
 -- 这些函数会自动利用索引：
 ST_DWithin(a.geom, b.geom, distance)
 ST_Intersects(a.geom, b.geom)  -- 实际上被优化为 && + 精确计算
-```
-
-## 导入数据
-
-### 用 sql
-
-```sql
-INSERT INTO "public".learn_table (feature_name, geom_linestring)
-SELECT
-  CONCAT_WS('-', 'pois', feature->'properties'->>'name') as feature_name,
-  ST_SetSRID(
-    ST_GeomFromGeoJSON(feature->'geometry'),  -- 关键修正：传入整个geometry对象
-    4326
-  ) AS geom_polygon
-FROM jsonb_array_elements(
-  '{
-  "type": "FeatureCollection",
-  "features": [
-    {
-      "type": "Feature",
-      "properties": { "name": "中山高速公路" },
-      "geometry": {
-        "type": "LineString",
-        "coordinates": [
-          [121.3, 25.1],
-          [121.55, 25.05],
-          [121.7, 24.9]
-        ]
-      }
-    }
-  ]
-}
-'::jsonb->'features'
-) AS feature;
-```
-
-### shp 类型的文件
-
-SHP 文件（Shapefile）是一种常见的地理空间矢量数据格式，它实际上由**至少三个必需文件**组成，有时还会有更多辅助文件。
-
-#### 📁 核心文件结构（必需）
-
-| 文件扩展名 | 用途             | 重要性                                                              |
-| :--------- | :--------------- | :------------------------------------------------------------------ |
-| **`.shp`** | **主体图形文件** | **必需**。存储几何图形本身（点、线、面等的坐标）。                  |
-| **`.shx`** | **图形索引文件** | **必需**。存储`.shp`中几何体的位置索引，用于快速访问。              |
-| **`.dbf`** | **属性数据文件** | **必需**。以 dBase 格式存储几何体对应的属性信息（如名称、面积等）。 |
-
-这三个文件必须**同名且在同一目录下**。如果缺少任何一个，大部分 GIS 软件都无法正确读取数据。例如，一个名为`fujian_roads`的 Shapefile，其文件夹内必须包含：
-
-- `fujian_roads.shp`
-- `fujian_roads.shx`
-- `fujian_roads.dbf`
-
-#### 🔧 常见辅助文件
-
-除了上述三个核心文件，还可能存在以下文件，它们为数据提供额外信息：
-
-| 文件扩展名          | 用途                                                                                                                                |
-| :------------------ | :---------------------------------------------------------------------------------------------------------------------------------- |
-| **`.prj`**          | **坐标系统文件**。非常重要，它以文本形式定义了数据的坐标系（如 WGS84、GCJ-02 等）。没有它，GIS 软件无法将数据定位到正确的地理位置。 |
-| **`.cpg`**          | **字符编码说明文件**。用于指定`.dbf`文件的编码（如 UTF-8、GBK），防止中文字段乱码。                                                 |
-| **`.sbn` / `.sbx`** | 空间索引文件，用于加快空间查询速度。由某些 GIS 软件（如 ArcGIS）自动生成。                                                          |
-| **`.shp.xml`**      | 元数据文件，以 XML 格式描述数据集的来源、精度等信息。                                                                               |
-
-#### 📄 内部结构示例
-
-以“福建省行政区划”数据为例，它的 `.dbf` 文件（属性表）可能包含如下字段：
-
-| OBJECTID | NAME   | CODE   | AREA     | ... |
-| :------- | :----- | :----- | :------- | :-- |
-| 1        | 福州市 | 350100 | 12109.47 | ... |
-| 2        | 厦门市 | 350200 | 1699.39  | ... |
-| 3        | 莆田市 | 350300 | 4119.02  | ... |
-
-而这个 `.dbf` 表中的每一行，都通过内部 ID 与 `.shp` 文件中对应的一条几何图形（如福州市的多边形边界）**严格关联**。`.shx` 文件则记录了这条多边形在 `.shp` 文件中的具体存储位置，以便快速读取。
-
-#### 🛠️ 如何处理 SHP 文件？
-
-理解了结构，操作就很简单了：
-
-1.  **永远以“文件包”形式处理**：在复制、移动或分享时，务必确保所有相关文件（至少 `.shp`, `.shx`, `.dbf`）一起操作。
-2.  **导入 PostGIS**：
-    - **使用`shp2pgsql`工具**（PostGIS 自带命令行工具）：
-      ```bash
-      shp2pgsql -s 4326 -W GBK /path/to/fujian_roads.shp fujian_roads | psql -d your_database
-      ```
-      - `-s 4326`：指定目标 SRID（如果 `.prj` 存在，可以先用 `-D` 参数自动探测）
-      - `-W GBK`：如果属性表含中文，通常需指定 GBK 编码
-    - **使用 QGIS**：在 QGIS 中加载 SHP 图层后，通过右键菜单“导出” -> “要素存储为”，选择 PostgreSQL 连接，即可直观导入。
-    - **ogr2ogr**: 详见下一个小节
-
-### 用 ogr2ogr
-
-> 导入 shp
-
-参数解析:
-
-1. `-nln` 表名
-2. `-nlt` 选项代表“新图层类型”。特别是对于 shape 文件输入，新图层类型通常是“多部分几何”，因此系统需要事先告知使用“MultiPolygon”而不是“Polygon”作为几何类型。
-3. `-lco` 选项代表“图层创建选项”。不同的驱动程序具有不同的创建选项，我们在这里使用了 PostgreSQL 驱动程序 的三个选项。
-
-   **GEOMETRY_NAME**设置几何列的列名。我们倾向于使用"geom"而不是默认值，以使我们的表与研讨会中的标准列名匹配。
-
-   **FID**设置主键列名。同样，我们更喜欢使用"gid"，这是研讨会中使用的标准。
-
-   **PRECISION**控制数字字段在数据库中的表示方式。在加载 shape 文件时，默认情况下使用数据库的“numeric”类型，这更精确，但有时比“integer”和“double precision”等简单数值类型更难处理。我们使用"NO"来关闭"numeric"类型。
-
-4. `-progress` 展示进度
-5. `-t_srs EPSG:4326` 转换 shp 文件中默认的坐标系
-6. `Pg:"dbname=nyc host=localhost user=postgres port=8096 password=123456` postgre 连接串
-7. `nyc_census_blocks_2000.shp` shp 文件
-
-8. `-skipfailures` 遇到错误要素时跳过，继续执行，防止单个错误导致整个任务失败。
-9. `-append` 追加而不是新建表
-10. `-update` 会尝试根据关键字更新
-11. `-where "POPULATION > 1000"` 条件导入
-
-```sql
--- 要给对应的数据库开启 postgis 扩展, 否则无法导入
-CREATE EXTENSION postgis;
-SELECT postgis_full_version();
-```
-
-```bash
-ogr2ogr   -nln nyc_census_blocks_2000   -nlt PROMOTE_TO_MULTI   -lco GEOMETRY_NAME=geom   -lco FID=gid   -lco PRECISION=NO   Pg:"dbname=nyc host=localhost user=postgres port=8096 password=123456" -progress -t_srs EPSG:4326  E:\MineSoft\noob_postgis\.database\postgis-workshop\data\2000\nyc_census_blocks_2000.shp
 ```
 
 ## 索引,性能,优化
