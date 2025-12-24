@@ -429,90 +429,148 @@ WHERE ST_Equals(
 -- Broad St
 ```
 
-### ST_Intersects, ST_Disjoint, ST_Crosses and ST_Overlaps
+### 相交/相离
 
-`ST_Intersects`、`ST_Crosses`和 `ST_Overlaps` 用于检测几何图形内部区域是否发生相交。
+ST_Intersects, ST_Disjoint, ST_Crosses, ST_Overlaps
 
-![图片](https://postgis.net/workshops/zh_Hans/postgis-intro/_images/st_intersects.png)
+- **判断相交**: `ST_Intersects`、`ST_Crosses`和 `ST_Overlaps` 用于检测几何图形内部区域是否发生相交。
+- **不相交**: `ST_Disjoint` 不相交
 
 `ST_Intersects(geometry A, geometry B)` 当两个图形存在任意空间交集时返回 t（TRUE），即边界或内部发生相交即视为满足条件。
 
-![图片](https://postgis.net/workshops/zh_Hans/postgis-intro/_images/st_disjoint.png)
+`ST_Disjoint(geometry A , geometry B)`。两个几何图形互不相交，则返回 t(True)
 
-与 `ST_Intersects` 相对的是 `ST_Disjoint(geometry A , geometry B)`。若两个几何图形互不相交(disjoint)，则它们不存在任何空间交集，反之亦然。实际上，测试"不相交"(not intersects)通常比直接测试"相离"(disjoint)更高效——因为相交测试可利用空间索引优化，而相离测试则无法利用索引。
+> 实际上，测试"不相交"(not intersects)通常比直接测试"相离"(disjoint)更高效<br>
+> ——因为相交测试可利用空间索引优化，而相离测试则无法利用索引。
 
-![图片](https://postgis.net/workshops/zh_Hans/postgis-intro/_images/st_crosses.png)
-
-`ST_Crosses(geometry A, geometry B)` 用于以下几何类型组合的比对：
-
-- 多点/多边形、多点/线串、线串/线串、线串/多边形、线串/多多边形。
-
-当同时满足：
+`ST_Crosses(geometry A, geometry B)` 满足以下
 
 1.  交集结果的几何维度比两个源几何的最大维度小
 1.  该交集同时位于两个源几何内部时，函数返回 TRUE。
 
-![图片](https://postgis.net/workshops/zh_Hans/postgis-intro/_images/st_overlaps.png)
-
 `ST_Overlaps(geometry A, geometry B)` 用于比对两个同维度几何图形，当满足以下条件时返回 TRUE
 
-以下是通过 :command:`ST_Intersects`函数确定「Broad Street」地铁站所属行政辖区的示例：
+以下是通过 `ST_Intersects`函数确定「Broad Street」地铁站所属行政辖区的示例：
 
-SELECT name, ST_AsText(geom)
-FROM nyc_subway_stations
-WHERE name = 'Broad St';
-POINT(583571 4506714)
-SELECT name, boroname
-FROM nyc_neighborhoods
-WHERE ST_Intersects(geom, ST_GeomFromText('POINT(583571 4506714)',26918));
-name | boroname
---------------------+-----------
-Financial District | Manhattan
-11.3. ST_Touches
-:command:`ST_Touches`用于检测两个几何图形是否边界接触但内部无交集
+```sql
+-- 「Broad St」地铁站所属行政辖区 ?
+SELECT nn."name", nn.boroname FROM "public".nyc_subway_stations nss INNER JOIN "public".nyc_neighborhoods nn ON st_intersects(nn.geom, nss.geom) WHERE nss.name = 'Broad St';
+-- name | boroname
+-- Financial District | Manhattan
+```
 
-![图片](https://postgis.net/workshops/zh_Hans/postgis-intro/_images/st_touches.png)
-ST_Touches(geometry A, geometry B) 当满足以下任一条件时返回 TRUE：两个几何图形的边界存在交集；仅其中一个几何图形的内部与另一个图形的边界相交。
+### 边界接触
 
-11.4. ST_Within 和 ST_Contains
-ST_Within 与 ST_Contains 用于检测两个几何图形之间的完全包含关系。
+`ST_Touches(geometry A, geometry B) `检测两个几何图形是否边界接触但内部无交集
 
-![图片](https://postgis.net/workshops/zh_Hans/postgis-intro/_images/st_within.png)
-ST_Within(geometry A , geometry B) 当第一个几何图形完全包含于第二个几何图形时返回 TRUE。该函数与 :command:ST_Contains 的检测结果互为逆反关系。
+```sql
+-- 共享右上角点(1,1)
+SELECT st_touches(st_geomfromtext('POLYGON((0 0,1 0,1 1,0 1,0 0))'), st_geomfromtext('POLYGON((1 1, 2 1, 2 2, 1 2, 1 1))'));
+```
 
-:command:`ST_Contains(geometry A, geometry B)`当第二个几何图形完全被包含于第一个几何图形内部时返回 TRUE。
+### 完全包含
 
-11.5. ST_Distance 和 ST_DWithin
-GIS 领域中一个极其常见的问题是："找出与指定对象距离在 X 范围内的所有要素"。
+`ST_Within` 与 `ST_Contains` 用于检测两个几何图形之间的完全包含关系。
 
-ST_Distance(geometry A, geometry B) 用于计算两个几何图形之间的最短距离，并以浮点数形式返回结果。该函数特别适用于需要精确报告对象间距离的场景。
+`ST_Within(geometry A , geometry B)` 检查几何图形 A 是否完全在 B 的内部（不包括边界）。该函数与 ST_Contains 的检测结果互为逆反关系。
 
-SELECT ST_Distance(
-ST_GeometryFromText('POINT(0 5)'),
-ST_GeometryFromText('LINESTRING(-2 2, 2 2)'));
-3
-ST_DWithin 函数提供基于索引加速的布尔距离检测，用于判断两个对象是否处于指定距离范围内。该函数特别适用于诸如"道路 500 米范围内有多少树木"这类空间分析场景——无需实际生成缓冲区，仅需测试距离关系即可获得结果。
+`ST_Contains(geometry A, geometry B)` 检查几何图形 A 是否完全包含 B（B 在 A 的内部）
 
-![图片](https://postgis.net/workshops/zh_Hans/postgis-intro/_images/st_dwithin.png)
+```sql
+-- 更复杂的示例：多个几何图形的包含关系
+SELECT
+    -- 小矩形在大矩形内（ST_Within）
+    ST_Within(
+        ST_GeomFromText('POLYGON((1 1, 3 1, 3 3, 1 3, 1 1))'),
+        ST_GeomFromText('POLYGON((0 0, 5 0, 5 5, 0 5, 0 0))')
+    ) AS small_in_large,
+
+    -- 大矩形包含小矩形（ST_Contains）
+    ST_Contains(
+        ST_GeomFromText('POLYGON((0 0, 5 0, 5 5, 0 5, 0 0))'),
+        ST_GeomFromText('POLYGON((1 1, 3 1, 3 3, 1 3, 1 1))')
+    ) AS large_contains_small,
+
+    -- 边界上的点（注意：在边界上不算 within）
+    ST_Within(
+        ST_GeomFromText('POINT(4 4)'),
+        ST_GeomFromText('POLYGON((0 0, 4 0, 4 4, 0 4, 0 0))')
+    ) AS point_on_boundary;
+```
+
+### 计算距离
+
+`ST_Distance(geometry A, geometry B)` 用于计算两个几何图形之间的最短距离，并以浮点数形式返回结果。
+
+```sql
+SELECT
+  ST_Distance (ST_GeometryFromText ('POINT(0 5)'), ST_GeometryFromText ('LINESTRING(-2 2, 2 2)'));
+-- 3
+```
+
+`ST_DWithin` 函数提供基于索引加速的布尔距离检测，用于判断两个对象是否处于指定距离范围内。
+
+> 该函数特别适用于诸如"道路 500 米范围内有多少树木"这类空间分析场景——无需实际生成缓冲区，仅需测试距离关系即可获得结果。
+
 以下是通过空间查询查找 Broad Street 地铁站周边 10 米范围内街道的 SQL 示例：
 
-SELECT name
-FROM nyc_streets
-WHERE ST_DWithin(
-geom,
-ST_GeomFromText('POINT(583571 4506714)',26918),
-10
-);
-name
+```sql
+-- 查找Broad Street地铁站周边10米范围内街道
+SELECT name FROM nyc_streets
+  WHERE ST_DWithin (geom, ST_GeomFromText ('POINT(583571 4506714)', 26918), 10);
+```
 
----
+### 练习
 
-Wall St
-Broad St
-Nassau St
-我们可通过地图验证该结论：Broad St 地铁站实际位于 Wall Street、Broad Street 和 Nassau Street 三条道路的交汇处。
+```sql
+-- 名为“Atlantic Commons”的街道的几何值是多少？
+SELECT st_astext(geom) FROM "public".nyc_streets WHERE "name" = 'Atlantic Commons';
 
-![图片](//postgis.net/workshops/zh_Hans/postgis-intro/\_images/broad_st.jpg
+-- “Atlantic Commons” 位于哪个街区和行政区?
+SELECT ns."name", nn.boroname FROM "public".nyc_streets ns INNER JOIN "public".nyc_neighborhoods nn ON st_intersects(ns.geom, nn.geom) WHERE ns."name" = 'Atlantic Commons';
+
+-- “Atlantic Commons” 与哪些街道相连
+SELECT ns2."name" FROM nyc_streets ns INNER JOIN nyc_streets ns2 ON st_dwithin(ns.geom, ns2.geom, 0.1) AND ns.gid != ns2.gid WHERE ns."name" = 'Atlantic Commons' ;
+
+-- 大约有多少人居住在 “Atlantic Commons”（50 米范围内）
+SELECT SUM(ncb.popn_total) FROM nyc_streets ns INNER JOIN nyc_census_blocks ncb ON st_dwithin(ns.geom, ncb.geom, 50) WHERE ns."name" = 'Atlantic Commons' ;
+```
+
+## 空间连接
+
+其实就是连表查询, 但是连接条件是空间关系
+
+### 连接与总结
+
+问题驱动: **Manhattan 区的人口和种族构成是多少？**
+
+> 分析: 人口与种族数据在 census 表, 所以需要连接 nyc_neighborhoods & census 条件是 geom 相交<br>
+
+```sql
+-- Manhattan 所有社区的人口和种族构成是多少？
+SELECT
+  nn."name",
+  SUM(ncb.popn_total) AS pop_total,
+  100 * SUM(ncb.popn_white) / SUM(ncb.popn_total) AS w_pct,
+  100 * SUM(ncb.popn_black) / SUM(ncb.popn_total) AS b_pct
+FROM
+  nyc_neighborhoods nn
+  INNER JOIN nyc_census_blocks ncb ON st_intersects (nn.geom, ncb.geom)
+WHERE
+  nn."boroname" = 'Manhattan'
+GROUP BY
+  nn.name
+ORDER BY
+  w_pct DESC;
+
+-- 整个纽约的人口构成?
+SELECT
+  SUM(ncb.popn_total) AS pop_total,
+  100 * SUM(ncb.popn_white) / SUM(ncb.popn_total) AS w_pct,
+  100 * SUM(ncb.popn_black) / SUM(ncb.popn_total) AS b_pct
+FROM
+  nyc_census_blocks ncb;
+```
 
 ## 常用函数
 
